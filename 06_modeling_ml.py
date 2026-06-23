@@ -1,221 +1,265 @@
 """
 =============================================================
-  Modeling Machine Learning — Klasifikasi Sentimen MBG
+  TAHAP TAMBAHAN 2 — Modeling Machine Learning
+  Data MBG (Makan Bergizi Gratis)
 =============================================================
 
-Melatih 3 model klasik untuk klasifikasi sentimen, menggunakan
-label dari IndoBERT (yang sudah dikoreksi sarkasme) sebagai
-ground truth:
-  - Logistic Regression
-  - Multinomial Naive Bayes
-  - Linear SVM
+Melatih 3 model klasifikasi teks klasik untuk memprediksi sentimen,
+menggunakan label hasil IndoBERT (yang sudah dikoreksi sarkasme)
+sebagai ground truth:
+  1. Logistic Regression
+  2. Multinomial Naive Bayes
+  3. Linear SVM
 
-Fitur: TF-IDF (unigram + bigram) dari teks yang sudah di-preprocessing
-(teks_final: hasil cleaning, normalisasi, stopword removal, stemming).
+Fitur: TF-IDF (unigram + bigram)
 
-CATATAN METODOLOGI:
-Label yang dipakai untuk training BUKAN label manual (gold standard),
-melainkan label dari IndoBERT yang sudah melalui koreksi sarkasme
-berbasis kamus. Ini berarti model ML yang dilatih di sini mengukur
-seberapa baik fitur TF-IDF + model klasik bisa MENIRU keputusan
-IndoBERT (+koreksi), bukan mengukur akurasi absolut terhadap
-kebenaran objektif. Akurasi tinggi berarti pola linguistik yang
-dipelajari IndoBERT cukup konsisten untuk dipelajari ulang oleh
-model yang lebih sederhana.
+Tujuan: membandingkan performa model klasik vs model deep learning
+(IndoBERT), serta mengidentifikasi kata-kata yang paling berpengaruh
+terhadap masing-masing kelas sentimen (interpretability).
 
-Fokus pada kelas Positif vs Negatif (kelas Netral dikeluarkan dari
-training, mengikuti praktik umum karena kelas netral seringkali
-tidak punya sinyal kata kunci yang jelas, hanya "ketidakhadiran"
-sinyal positif/negatif).
+Input : data/output/mbg_sentimen_final_terkoreksi.csv
+Output: data/output/model_comparison.csv + visualisasi
 """
 
 import pandas as pd
 import numpy as np
-import glob
 import os
-
-import matplotlib.pyplot as plt
-import seaborn as sns
+import joblib
 
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.svm import LinearSVC
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.metrics import (
+    accuracy_score, f1_score, precision_score, recall_score,
+    classification_report, confusion_matrix
+)
+
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+import seaborn as sns
 
 OUTPUT_DIR = "data/output"
 FIGURE_DIR = os.path.join(OUTPUT_DIR, "figures")
+MODEL_DIR = os.path.join(OUTPUT_DIR, "models")
+INPUT_CSV = os.path.join(OUTPUT_DIR, "mbg_sentimen_final_terkoreksi.csv")
+
+RANDOM_STATE = 42
+TEST_SIZE = 0.2
 
 
-def load_data() -> pd.DataFrame:
-    files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "mbg_dengan_emosi.csv")))
-    if not files:
-        files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "mbg_sentimen_final_terkoreksi.csv")))
-    if not files:
-        files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "mbg_sentimen_*.csv")))
-    if not files:
-        raise FileNotFoundError("Tidak ada file hasil sentimen ditemukan.")
+# ─────────────────────────────────────────────
+# 1. LOAD & SIAPKAN DATA
+# ─────────────────────────────────────────────
 
-    path = files[-1]
-    print(f"[📂] Membaca: {path}")
-    df = pd.read_csv(path, encoding="utf-8-sig")
-    df["teks_final"] = df["teks_final"].fillna("").astype(str)
-    return df
+def siapkan_data():
+    df = pd.read_csv(INPUT_CSV, encoding="utf-8-sig")
+    print(f"[📂] Total baris dimuat: {len(df)}")
 
+    df = df[df["teks_final"].fillna("").str.strip().str.len() >= 3].copy()
+    print(f"[🧹] Setelah buang teks kosong/pendek: {len(df)}")
 
-def siapkan_data_modeling(df: pd.DataFrame):
-    # Fokus Positif vs Negatif, keluarkan Netral
-    df_model = df[df["teks_final"].str.len() > 5].copy()
-    df_model = df_model[df_model["sentimen"].isin(["Positif", "Negatif"])].copy()
+    X = df["teks_final"].fillna("")
+    y = df["sentimen"]
 
-    print(f"\n[📊] Data untuk modeling: {len(df_model)} baris")
-    print(df_model["sentimen"].value_counts().to_string())
+    print(f"\n[📊] Distribusi label sebelum split:")
+    print(y.value_counts().to_string())
 
-    if len(df_model) < 30:
-        raise ValueError(
-            "Data terlalu sedikit untuk modeling yang representatif "
-            f"({len(df_model)} baris, minimal disarankan 30+)."
-        )
-
-    le = LabelEncoder()
-    y = le.fit_transform(df_model["sentimen"])
-    X = df_model["teks_final"]
-
-    return X, y, le, df_model
+    return X, y, df
 
 
-def main():
+# ─────────────────────────────────────────────
+# 2. TRAINING & EVALUASI
+# ─────────────────────────────────────────────
+
+def latih_dan_evaluasi(X_train, X_test, y_train, y_test, vectorizer):
+    X_train_tfidf = vectorizer.fit_transform(X_train)
+    X_test_tfidf = vectorizer.transform(X_test)
+
+    model_list = {
+        "Logistic Regression": LogisticRegression(max_iter=1000, random_state=RANDOM_STATE, class_weight="balanced"),
+        "Naive Bayes": MultinomialNB(),
+        "Linear SVM": LinearSVC(random_state=RANDOM_STATE, class_weight="balanced", max_iter=5000),
+    }
+
+    hasil = {}
+    for nama, model in model_list.items():
+        print(f"\n[🤖] Melatih {nama}...")
+        model.fit(X_train_tfidf, y_train)
+        y_pred = model.predict(X_test_tfidf)
+
+        akurasi = accuracy_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred, average="weighted")
+        precision = precision_score(y_test, y_pred, average="weighted", zero_division=0)
+        recall = recall_score(y_test, y_pred, average="weighted", zero_division=0)
+
+        print(f"   Akurasi  : {akurasi:.4f}")
+        print(f"   F1-score : {f1:.4f}")
+        print(f"   Precision: {precision:.4f}")
+        print(f"   Recall   : {recall:.4f}")
+        print(f"\n{classification_report(y_test, y_pred, zero_division=0)}")
+
+        hasil[nama] = {
+            "model": model,
+            "akurasi": akurasi,
+            "f1_score": f1,
+            "precision": precision,
+            "recall": recall,
+            "y_pred": y_pred,
+        }
+
+    return hasil, vectorizer
+
+
+# ─────────────────────────────────────────────
+# 3. VISUALISASI
+# ─────────────────────────────────────────────
+
+def plot_perbandingan_model(hasil: dict):
+    metrik = ["akurasi", "f1_score", "precision", "recall"]
+    nama_model = list(hasil.keys())
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    x = np.arange(len(nama_model))
+    width = 0.2
+
+    for i, m in enumerate(metrik):
+        nilai = [hasil[model][m] for model in nama_model]
+        ax.bar(x + i * width, nilai, width, label=m.capitalize())
+
+    ax.set_xticks(x + width * 1.5)
+    ax.set_xticklabels(nama_model)
+    ax.set_ylabel("Skor")
+    ax.set_ylim(0, 1.05)
+    ax.set_title("Perbandingan Performa Model Klasik — Klasifikasi Sentimen MBG", fontweight="bold")
+    ax.legend(loc="lower right")
+    ax.spines[['top', 'right']].set_visible(False)
+
+    plt.tight_layout()
+    path = os.path.join(FIGURE_DIR, "08_perbandingan_model.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[💾] Gambar disimpan: {path}")
+
+
+def plot_confusion_matrix_semua(hasil: dict, y_test, label_order=("Negatif", "Netral", "Positif")):
+    fig, axes = plt.subplots(1, len(hasil), figsize=(6 * len(hasil), 5))
+    if len(hasil) == 1:
+        axes = [axes]
+
+    for ax, (nama, info) in zip(axes, hasil.items()):
+        cm = confusion_matrix(y_test, info["y_pred"], labels=label_order)
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax,
+                    xticklabels=label_order, yticklabels=label_order)
+        ax.set_title(f"{nama}\n(akurasi={info['akurasi']:.3f})", fontweight="bold")
+        ax.set_xlabel("Prediksi")
+        ax.set_ylabel("Aktual")
+
+    plt.tight_layout()
+    path = os.path.join(FIGURE_DIR, "09_confusion_matrix.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[💾] Gambar disimpan: {path}")
+
+
+def tampilkan_fitur_penting(vectorizer, model, nama_model: str, label_order, top_n: int = 15):
+    if not hasattr(model, "coef_"):
+        print(f"[ℹ️] {nama_model} tidak memiliki koefisien linear, fitur penting dilewati.")
+        return None
+
+    fitur_names = np.array(vectorizer.get_feature_names_out())
+    hasil_fitur = {}
+
+    for i, label in enumerate(model.classes_):
+        koef = model.coef_[i] if model.coef_.shape[0] > 1 else model.coef_[0]
+        top_idx = np.argsort(koef)[-top_n:][::-1]
+        hasil_fitur[label] = list(zip(fitur_names[top_idx], koef[top_idx]))
+
+    return hasil_fitur
+
+
+def plot_fitur_penting(hasil_fitur: dict, nama_model: str):
+    if not hasil_fitur:
+        return
+
+    n_label = len(hasil_fitur)
+    fig, axes = plt.subplots(1, n_label, figsize=(6 * n_label, 6))
+    if n_label == 1:
+        axes = [axes]
+
+    WARNA = {"Positif": "#4CAF50", "Netral": "#2196F3", "Negatif": "#F44336"}
+
+    for ax, (label, fitur_list) in zip(axes, hasil_fitur.items()):
+        kata = [f for f, _ in fitur_list][::-1]
+        skor = [s for _, s in fitur_list][::-1]
+        ax.barh(kata, skor, color=WARNA.get(label, "grey"))
+        ax.set_title(f"Kata Paling Berpengaruh — {label}", fontweight="bold")
+        ax.set_xlabel("Koefisien (kontribusi ke kelas)")
+
+    fig.suptitle(f"Fitur Penting — {nama_model}", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    path = os.path.join(FIGURE_DIR, "10_fitur_penting.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[💾] Gambar disimpan: {path}")
+
+
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
+
+if __name__ == "__main__":
     print("=" * 60)
-    print("  Modeling Machine Learning — Sentimen MBG")
+    print("  Modeling Machine Learning — Klasifikasi Sentimen MBG")
     print("=" * 60)
 
     os.makedirs(FIGURE_DIR, exist_ok=True)
+    os.makedirs(MODEL_DIR, exist_ok=True)
 
-    df = load_data()
-    X, y, le, df_model = siapkan_data_modeling(df)
-
-    # ── TF-IDF ──────────────────────────────────
-    tfidf = TfidfVectorizer(
-        ngram_range=(1, 2),
-        max_features=3000,
-        min_df=2,
-        max_df=0.95,
-        sublinear_tf=True,
-    )
-    X_tfidf = tfidf.fit_transform(X)
+    X, y, df = siapkan_data()
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X_tfidf, y, test_size=0.2, random_state=42, stratify=y
+        X, y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y
     )
+    print(f"\n[📊] Data latih: {len(X_train)} | Data uji: {len(X_test)}")
 
-    print(f"\n[✅] TF-IDF selesai!")
-    print(f"   Fitur: {X_tfidf.shape[1]}")
-    print(f"   Train: {X_train.shape[0]} | Test: {X_test.shape[0]}")
+    vectorizer = TfidfVectorizer(max_features=3000, ngram_range=(1, 2), min_df=2)
+    hasil, vectorizer = latih_dan_evaluasi(X_train, X_test, y_train, y_test, vectorizer)
 
-    # ── Training 3 model ──────────────────────────
-    models = {
-        "Logistic Regression": LogisticRegression(C=1.0, max_iter=1000, random_state=42),
-        "Naive Bayes": MultinomialNB(alpha=0.1),
-        "Linear SVM": LinearSVC(C=1.0, max_iter=2000, random_state=42, class_weight="balanced"),
-    }
+    print("\n[📈] Membuat visualisasi perbandingan model...")
+    plot_perbandingan_model(hasil)
+    plot_confusion_matrix_semua(hasil, y_test)
 
-    hasil_model = {}
-    print("\n" + "=" * 60)
-    print("  EVALUASI MODEL KLASIFIKASI SENTIMEN")
-    print("=" * 60)
+    print("\n[🔍] Menganalisis fitur/kata paling berpengaruh...")
+    model_terbaik_nama = max(hasil, key=lambda k: hasil[k]["f1_score"])
+    print(f"[🏆] Model dengan F1-score terbaik: {model_terbaik_nama}")
 
-    for nama, model in models.items():
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
+    hasil_fitur = tampilkan_fitur_penting(
+        vectorizer, hasil["Logistic Regression"]["model"],
+        "Logistic Regression", label_order=y.unique()
+    )
+    if hasil_fitur:
+        plot_fitur_penting(hasil_fitur, "Logistic Regression")
 
-        acc = accuracy_score(y_test, y_pred)
-        report = classification_report(y_test, y_pred, target_names=le.classes_, output_dict=True)
-        cm = confusion_matrix(y_test, y_pred)
+    joblib.dump(hasil[model_terbaik_nama]["model"], os.path.join(MODEL_DIR, "model_terbaik.pkl"))
+    joblib.dump(vectorizer, os.path.join(MODEL_DIR, "tfidf_vectorizer.pkl"))
+    print(f"\n[💾] Model terbaik ({model_terbaik_nama}) & vectorizer disimpan di {MODEL_DIR}/")
 
-        hasil_model[nama] = {"model": model, "accuracy": acc, "report": report, "cm": cm, "y_pred": y_pred}
-
-        print(f"\n📌 {nama}")
-        print(f"   Akurasi: {acc:.4f} ({acc*100:.2f}%)")
-        print(f"   F1-score (macro): {report['macro avg']['f1-score']:.4f}")
-        print(classification_report(y_test, y_pred, target_names=le.classes_))
-
-    best_model_name = max(hasil_model, key=lambda x: hasil_model[x]["accuracy"])
-    print(f"\n🏆 Model Terbaik: {best_model_name} ({hasil_model[best_model_name]['accuracy']*100:.2f}%)")
-
-    # ── Visualisasi: Confusion Matrix ────────────
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle("Confusion Matrix — 3 Model Klasifikasi Sentimen", fontsize=14, fontweight="bold")
-    for i, (nama, hasil) in enumerate(hasil_model.items()):
-        sns.heatmap(hasil["cm"], annot=True, fmt="d", ax=axes[i], cmap="Blues",
-                    xticklabels=le.classes_, yticklabels=le.classes_)
-        axes[i].set_title(f"{nama}\nAkurasi: {hasil['accuracy']:.2%}", fontweight="bold")
-        axes[i].set_xlabel("Prediksi")
-        axes[i].set_ylabel("Aktual")
-    plt.tight_layout()
-    path_cm = os.path.join(FIGURE_DIR, "08_confusion_matrix.png")
-    plt.savefig(path_cm, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"\n[💾] Gambar disimpan: {path_cm}")
-
-    # ── Visualisasi: Perbandingan akurasi & F1 ───
-    fig, ax = plt.subplots(figsize=(8, 4))
-    names = list(hasil_model.keys())
-    accs = [hasil_model[n]["accuracy"] for n in names]
-    f1s = [hasil_model[n]["report"]["macro avg"]["f1-score"] for n in names]
-
-    x = np.arange(len(names))
-    ax.bar(x - 0.2, accs, 0.35, label="Accuracy", color="#3498db")
-    ax.bar(x + 0.2, f1s, 0.35, label="F1-score", color="#e74c3c")
-    ax.set_xticks(x)
-    ax.set_xticklabels(names, rotation=10)
-    ax.set_ylim(0, 1)
-    ax.set_title("Perbandingan Performa 3 Model", fontweight="bold")
-    ax.legend()
-    plt.tight_layout()
-    path_perf = os.path.join(FIGURE_DIR, "09_perbandingan_model.png")
-    plt.savefig(path_perf, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"[💾] Gambar disimpan: {path_perf}")
-
-    # ── Fitur Penting (Logistic Regression) ──────
-    lr_model = hasil_model["Logistic Regression"]["model"]
-    feature_names = tfidf.get_feature_names_out()
-
-    if hasattr(lr_model, "coef_") and len(le.classes_) == 2:
-        coef = lr_model.coef_[0]
-        top_pos = np.argsort(coef)[-20:][::-1]
-        top_neg = np.argsort(coef)[:20]
-
-        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-        axes[0].barh([feature_names[i] for i in top_pos], coef[top_pos], color="#2ecc71")
-        axes[0].set_title(f"Top 20 Kata → {le.classes_[1]}", fontweight="bold")
-        axes[0].invert_yaxis()
-
-        axes[1].barh([feature_names[i] for i in top_neg], np.abs(coef[top_neg]), color="#e74c3c")
-        axes[1].set_title(f"Top 20 Kata → {le.classes_[0]}", fontweight="bold")
-        axes[1].invert_yaxis()
-
-        plt.tight_layout()
-        path_fitur = os.path.join(FIGURE_DIR, "10_fitur_penting.png")
-        plt.savefig(path_fitur, dpi=150, bbox_inches="tight")
-        plt.close()
-        print(f"[💾] Gambar disimpan: {path_fitur}")
-
-        print(f"\n[📋] Top 10 kata → kelas '{le.classes_[1]}':")
-        for i in top_pos[:10]:
-            print(f"   {feature_names[i]:20s} (koef: {coef[i]:+.3f})")
-        print(f"\n[📋] Top 10 kata → kelas '{le.classes_[0]}':")
-        for i in top_neg[:10]:
-            print(f"   {feature_names[i]:20s} (koef: {coef[i]:+.3f})")
+    df_perbandingan = pd.DataFrame({
+        nama: {
+            "Akurasi": info["akurasi"],
+            "F1-Score": info["f1_score"],
+            "Precision": info["precision"],
+            "Recall": info["recall"],
+        }
+        for nama, info in hasil.items()
+    }).T
+    path_csv = os.path.join(OUTPUT_DIR, "model_comparison.csv")
+    df_perbandingan.to_csv(path_csv, encoding="utf-8-sig")
+    print(f"[💾] Tabel perbandingan model disimpan: {path_csv}")
+    print(f"\n{df_perbandingan.to_string()}")
 
     print("\n[🎉] Modeling selesai!")
-    print(f"\n[📋] RINGKASAN UNTUK LAPORAN:")
-    for nama, hasil in hasil_model.items():
-        print(f"   {nama:<22}: Akurasi {hasil['accuracy']*100:.1f}% | F1-macro {hasil['report']['macro avg']['f1-score']:.3f}")
-    print(f"   🏆 Model terbaik: {best_model_name}")
-
-
-if __name__ == "__main__":
-    main()
+    print("     Lanjutkan ke 07_evaluasi_lengkap.py untuk laporan evaluasi detail.")

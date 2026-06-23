@@ -1,32 +1,25 @@
 """
 =============================================================
-  Deteksi Emosi — Data MBG (Makan Bergizi Gratis)
+  TAHAP TAMBAHAN 1 — Deteksi Emosi
+  Data MBG (Makan Bergizi Gratis)
 =============================================================
 
-Pendekatan: lexicon-based, mirip NRC Emotion Lexicon, disesuaikan
-ke Bahasa Indonesia dan konteks isu sosial-politik MBG.
+Mendeteksi emosi dominan pada setiap caption/komentar menggunakan
+kamus leksikon emosi Bahasa Indonesia (pendekatan berbasis kata kunci,
+terinspirasi dari NRC Emotion Lexicon yang diadaptasi ke Bahasa Indonesia).
 
-Emosi yang dideteksi: marah, takut, sedih, senang, terkejut,
-percaya, antisipasi, jijik.
+8 kategori emosi: Marah, Takut, Sedih, Senang, Terkejut, Percaya,
+Antisipasi, Jijik -- ditambah Netral untuk teks tanpa kata kunci emosi.
 
-CATATAN METODOLOGI:
-Deteksi emosi BERBEDA dari analisis sentimen (Positif/Netral/Negatif).
-Sentimen mengukur ARAH (baik/buruk), sedangkan emosi mengukur JENIS
-perasaan spesifik. Dua komentar bisa sama-sama "negatif" tapi berbeda
-emosi -- misal kemarahan terhadap kebijakan vs kesedihan terhadap
-pelaksanaan di lapangan. Ini memberi nuansa yang tidak tertangkap
-oleh sentimen 3 kelas saja.
-
-Pendekatan lexicon-based memiliki keterbatasan: hanya mendeteksi
-kata kunci eksplisit, tidak memahami konteks/sarkasme/negasi secara
-mendalam (sama seperti keterbatasan yang sudah didokumentasikan
-pada tahap analisis sentimen).
+Input : data/output/mbg_sentimen_final_terkoreksi.csv
+Output: data/output/mbg_emosi.csv + visualisasi
 """
 
 import pandas as pd
 import re
 import os
-import glob
+from collections import Counter
+
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.rcParams['font.family'] = 'DejaVu Sans'
@@ -34,67 +27,65 @@ from wordcloud import WordCloud
 
 OUTPUT_DIR = "data/output"
 FIGURE_DIR = os.path.join(OUTPUT_DIR, "figures")
+INPUT_CSV = os.path.join(OUTPUT_DIR, "mbg_sentimen_final_terkoreksi.csv")
 
 # ─────────────────────────────────────────────
 # KAMUS EMOSI BAHASA INDONESIA
 # ─────────────────────────────────────────────
-# Disusun manual, fokus ke konteks isu sosial-politik/kebijakan publik
-# (bukan sekadar terjemahan literal dari NRC Lexicon Inggris)
-
 KAMUS_EMOSI = {
-    'marah': [
-        'marah', 'murka', 'amarah', 'berang', 'geram', 'emosi', 'protes',
-        'demo', 'ancam', 'serang', 'lawan', 'tolak', 'boikot', 'benci',
-        'menyerang', 'bubar', 'bubarin', 'korupsi', 'maling', 'tipu',
-        'bohong', 'kontol', 'goblok', 'tolol', 'anjing', 'bangsat',
+    "marah": [
+        "marah", "murka", "amarah", "berang", "geram", "emosi", "protes",
+        "demo", "ancam", "serang", "lawan", "tolak", "boikot", "benci",
+        "menyerang", "bubarin", "bubarkan", "stop", "korupsi", "maling",
+        "kontol", "tipu", "bohong", "bodoh", "goblok", "anjing",
     ],
-    'takut': [
-        'takut', 'khawatir', 'cemas', 'was-was', 'panik', 'ngeri',
-        'resiko', 'risiko', 'bahaya', 'ancaman', 'krisis', 'darurat',
-        'waspada', 'terancam', 'rawan', 'rentan', 'racun', 'beracun',
-        'keracunan', 'sakit', 'meninggal',
+    "takut": [
+        "takut", "khawatir", "cemas", "was-was", "panik", "ngeri",
+        "resiko", "risiko", "bahaya", "ancaman", "krisis", "darurat",
+        "waspada", "terancam", "rawan", "rentan", "beracun", "racun",
     ],
-    'sedih': [
-        'sedih', 'menderita', 'susah', 'sulit', 'berat', 'nelangsa',
-        'terpuruk', 'merana', 'miskin', 'kemiskinan', 'rugi', 'bangkrut',
-        'kecewa', 'putus asa', 'nestapa', 'menyesal', 'kasian', 'kasihan',
-        'prihatin', 'memprihatinkan',
+    "sedih": [
+        "sedih", "menderita", "susah", "sulit", "berat", "nelangsa",
+        "terpuruk", "merana", "miskin", "kemiskinan", "rugi", "bangkrut",
+        "kecewa", "putus asa", "nestapa", "menyesal", "kasian", "kasihan",
+        "honorer", "gaji kecil", "150 rb", "tipis",
     ],
-    'senang': [
-        'senang', 'bahagia', 'lega', 'puas', 'untung', 'berkah',
-        'sukses', 'berhasil', 'gembira', 'bangga', 'optimis', 'harapan',
-        'terbantu', 'manfaat', 'bermanfaat', 'terima kasih', 'makasih',
-        'alhamdulillah', 'mantap', 'keren', 'bagus',
+    "senang": [
+        "senang", "bahagia", "lega", "puas", "untung", "berkah",
+        "sukses", "berhasil", "gembira", "bangga", "optimis", "harapan",
+        "terima kasih", "makasih", "alhamdulillah", "mantap", "bagus",
+        "enak", "lezat", "bergizi",
     ],
-    'terkejut': [
-        'terkejut', 'kaget', 'mendadak', 'tiba-tiba', 'dadakan',
-        'lonjakan', 'melonjak', 'meledak', 'drastis', 'signifikan',
-        'ternyata', 'ketahuan', 'astaga', 'masyaallah',
+    "terkejut": [
+        "terkejut", "kaget", "mendadak", "tiba-tiba", "dadakan",
+        "lonjakan", "melonjak", "meledak", "drastis", "signifikan",
+        "ketahuan", "viral",
     ],
-    'percaya': [
-        'percaya', 'yakin', 'optimis', 'dukung', 'setuju', 'apresiasi',
-        'andalan', 'terpercaya', 'solid', 'kuat', 'amanah', 'tegas',
+    "percaya": [
+        "percaya", "yakin", "optimis", "dukung", "setuju", "apresiasi",
+        "andalan", "terpercaya", "solid", "kuat", "amanah", "transparan",
     ],
-    'antisipasi': [
-        'antisipasi', 'persiapan', 'rencana', 'strategi', 'kebijakan',
-        'alternatif', 'solusi', 'upaya', 'langkah', 'mitigasi',
-        'evaluasi', 'pengawasan', 'tindak lanjut', 'audit',
+    "antisipasi": [
+        "antisipasi", "persiapan", "rencana", "strategi", "kebijakan",
+        "alternatif", "solusi", "upaya", "langkah", "mitigasi",
+        "evaluasi", "tindak lanjut", "pantau", "awasi",
     ],
-    'jijik': [
-        'jijik', 'muak', 'menjijikkan', 'kotor', 'busuk', 'basi',
-        'jamuran', 'belatung', 'ulat', 'bau', 'rusak', 'kadaluarsa',
+    "jijik": [
+        "jijik", "muak", "menjijikkan", "busuk", "bau", "kotor",
+        "basi", "kadaluarsa", "kecoa", "ulat", "rusak",
     ],
 }
 
 EMOSI_EMOJI = {
-    'marah': '😡', 'takut': '😨', 'sedih': '😢', 'senang': '😊',
-    'terkejut': '😲', 'percaya': '🤝', 'antisipasi': '📋', 'jijik': '🤢',
+    "marah": "😡", "takut": "😨", "sedih": "😢", "senang": "😊",
+    "terkejut": "😲", "percaya": "🤝", "antisipasi": "🔮", "jijik": "🤢",
+    "netral": "😐",
 }
 
 WARNA_EMOSI = {
-    'marah': '#e74c3c', 'takut': '#e67e22', 'sedih': '#3498db',
-    'senang': '#2ecc71', 'terkejut': '#9b59b6', 'percaya': '#1abc9c',
-    'antisipasi': '#f39c12', 'jijik': '#7f8c8d',
+    "marah": "#E24B4A", "takut": "#BA7517", "sedih": "#378ADD",
+    "senang": "#639922", "terkejut": "#7F77DD", "percaya": "#1D9E75",
+    "antisipasi": "#D85A30", "jijik": "#5F5E5A", "netral": "#888780",
 }
 
 
@@ -105,108 +96,125 @@ def hitung_skor_emosi(teks: str) -> dict:
 
     teks_lower = teks.lower()
     skor = {}
-    for emosi, kata_list in KAMUS_EMOSI.items():
-        skor[emosi] = sum(1 for kata in kata_list if kata in teks_lower)
+    for emosi, kata_kunci in KAMUS_EMOSI.items():
+        skor[emosi] = sum(1 for kata in kata_kunci if kata in teks_lower)
     return skor
 
 
-def deteksi_emosi_dominan(skor: dict) -> str:
-    """Tentukan emosi dengan skor tertinggi; 'netral' jika semua skor 0."""
+def tentukan_emosi_dominan(skor: dict) -> str:
+    """Pilih emosi dengan skor tertinggi; jika semua 0, kembalikan 'netral'."""
     if max(skor.values()) == 0:
-        return 'netral'
+        return "netral"
     return max(skor, key=skor.get)
 
 
-def tambah_kolom_emosi(df: pd.DataFrame, kolom_teks: str = "teks_asli") -> pd.DataFrame:
+def deteksi_emosi_dataframe(df: pd.DataFrame, kolom_teks: str = "teks_asli") -> pd.DataFrame:
     df = df.copy()
-    skor_list = df[kolom_teks].apply(hitung_skor_emosi)
+    semua_skor = df[kolom_teks].apply(hitung_skor_emosi)
 
     for emosi in KAMUS_EMOSI:
-        df[f"emosi_{emosi}"] = skor_list.apply(lambda s: s[emosi])
+        df[f"emosi_{emosi}"] = semua_skor.apply(lambda s: s[emosi])
 
-    df["emosi_dominan"] = skor_list.apply(deteksi_emosi_dominan)
+    df["emosi_dominan"] = semua_skor.apply(tentukan_emosi_dominan)
     return df
 
 
-def plot_distribusi_emosi(df: pd.DataFrame):
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    fig.suptitle('Analisis Emosi — Komentar & Caption MBG', fontsize=14, fontweight='bold')
+# ─────────────────────────────────────────────
+# VISUALISASI
+# ─────────────────────────────────────────────
 
-    emosi_dist = df['emosi_dominan'].value_counts()
-    colors = [WARNA_EMOSI.get(e, '#bdc3c7') for e in emosi_dist.index]
+def plot_distribusi_emosi(df: pd.DataFrame):
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+    fig.suptitle("Analisis Emosi — Data Instagram MBG", fontsize=14, fontweight="bold")
+
+    emosi_dist = df["emosi_dominan"].value_counts()
+    colors = [WARNA_EMOSI.get(e, "#999") for e in emosi_dist.index]
     axes[0].barh(emosi_dist.index, emosi_dist.values, color=colors)
-    axes[0].set_title('Distribusi Emosi Dominan', fontweight='bold')
-    axes[0].set_xlabel('Jumlah')
+    axes[0].set_title("Distribusi Emosi Dominan", fontweight="bold")
+    axes[0].set_xlabel("Jumlah baris")
     axes[0].invert_yaxis()
 
-    emosi_cols = [f'emosi_{e}' for e in KAMUS_EMOSI.keys()]
+    emosi_cols = [f"emosi_{e}" for e in KAMUS_EMOSI]
     mean_emosi = df[emosi_cols].mean()
     mean_emosi.index = list(KAMUS_EMOSI.keys())
-    mean_sorted = mean_emosi.sort_values(ascending=True)
-    axes[1].barh(mean_sorted.index, mean_sorted.values,
-                 color=[WARNA_EMOSI.get(e, 'gray') for e in mean_sorted.index])
-    axes[1].set_title('Rata-rata Intensitas Skor Emosi', fontweight='bold')
-    axes[1].set_xlabel('Rata-rata Skor Kata Kunci')
+    mean_emosi_sorted = mean_emosi.sort_values()
+    axes[1].barh(
+        mean_emosi_sorted.index, mean_emosi_sorted.values,
+        color=[WARNA_EMOSI.get(e, "#999") for e in mean_emosi_sorted.index]
+    )
+    axes[1].set_title("Rata-rata Intensitas Skor Emosi", fontweight="bold")
+    axes[1].set_xlabel("Rata-rata jumlah kata kunci cocok")
 
     plt.tight_layout()
     path = os.path.join(FIGURE_DIR, "05_distribusi_emosi.png")
-    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"[💾] Gambar disimpan: {path}")
 
 
 def plot_wordcloud_emosi(df: pd.DataFrame):
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+    daftar_emosi = list(KAMUS_EMOSI.keys()) + ["netral"]
+    fig, axes = plt.subplots(2, 5, figsize=(22, 9))
     axes = axes.flatten()
-    fig.suptitle('Word Cloud per Emosi Dominan', fontsize=16, fontweight='bold')
+    fig.suptitle("WordCloud per Emosi Dominan", fontsize=15, fontweight="bold")
 
-    for i, emosi in enumerate(KAMUS_EMOSI.keys()):
-        subset = df[df['emosi_dominan'] == emosi]
+    for i, emosi in enumerate(daftar_emosi):
+        subset = df[df["emosi_dominan"] == emosi]
         if len(subset) == 0:
-            axes[i].text(0.5, 0.5, 'Data\ntidak cukup', ha='center', va='center')
-            axes[i].axis('off')
+            axes[i].text(0.5, 0.5, "Data\ntidak cukup", ha="center", va="center")
+            axes[i].axis("off")
             continue
 
-        teks_gabung = ' '.join(subset['teks_final'].fillna('').astype(str))
+        teks_gabung = " ".join(subset["teks_final"].fillna("").astype(str))
         if len(teks_gabung.strip()) < 10:
-            axes[i].axis('off')
+            axes[i].axis("off")
             continue
 
         wc = WordCloud(
-            width=400, height=200, background_color='white',
-            colormap='YlOrRd' if emosi not in ['senang', 'percaya'] else 'YlGn',
-            max_words=40,
+            width=350, height=220, background_color="white",
+            colormap="RdYlGn" if emosi in ["senang", "percaya"] else "YlOrRd",
+            max_words=30,
         ).generate(teks_gabung)
+        axes[i].imshow(wc, interpolation="bilinear")
+        axes[i].axis("off")
+        emoji = EMOSI_EMOJI.get(emosi, "")
+        axes[i].set_title(f"{emoji} {emosi.capitalize()} (n={len(subset)})", fontweight="bold", fontsize=11)
 
-        axes[i].imshow(wc, interpolation='bilinear')
-        axes[i].axis('off')
-        emoji = EMOSI_EMOJI.get(emosi, '')
-        axes[i].set_title(f'{emoji} {emosi.upper()} (n={len(subset)})', fontweight='bold')
+    for j in range(len(daftar_emosi), len(axes)):
+        axes[j].axis("off")
 
     plt.tight_layout()
     path = os.path.join(FIGURE_DIR, "06_wordcloud_emosi.png")
-    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"[💾] Gambar disimpan: {path}")
 
 
-def plot_emosi_vs_sentimen(df: pd.DataFrame):
-    """Cross-tab: hubungan antara sentimen (Positif/Netral/Negatif) dan emosi dominan."""
-    cross = pd.crosstab(df['emosi_dominan'], df['sentimen'])
+def plot_heatmap_korelasi_emosi(df: pd.DataFrame):
+    import seaborn as sns
+    import numpy as np
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    cross.plot(kind='barh', stacked=True, ax=ax,
-               color={'Positif': '#2ecc71', 'Netral': '#3498db', 'Negatif': '#e74c3c'})
-    ax.set_title('Hubungan Emosi Dominan dengan Sentimen', fontweight='bold')
-    ax.set_xlabel('Jumlah')
-    ax.set_ylabel('Emosi Dominan')
-    ax.legend(title='Sentimen')
+    emosi_cols = [f"emosi_{e}" for e in KAMUS_EMOSI]
+    corr = df[emosi_cols].corr()
+    corr.columns = list(KAMUS_EMOSI.keys())
+    corr.index = list(KAMUS_EMOSI.keys())
+
+    mask = np.triu(np.ones_like(corr, dtype=bool))
+
+    plt.figure(figsize=(9, 7))
+    sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", center=0,
+                mask=mask, linewidths=0.5, annot_kws={"size": 9})
+    plt.title("Korelasi Antar Emosi — Data MBG", fontsize=13, fontweight="bold")
     plt.tight_layout()
-    path = os.path.join(FIGURE_DIR, "07_emosi_vs_sentimen.png")
-    plt.savefig(path, dpi=150, bbox_inches='tight')
+    path = os.path.join(FIGURE_DIR, "07_korelasi_emosi.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"[💾] Gambar disimpan: {path}")
 
+
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("=" * 60)
@@ -215,28 +223,23 @@ if __name__ == "__main__":
 
     os.makedirs(FIGURE_DIR, exist_ok=True)
 
-    files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "mbg_sentimen_final_terkoreksi.csv")))
-    if not files:
-        files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "mbg_sentimen_*.csv")))
-    if not files:
-        raise FileNotFoundError("Tidak ada file hasil sentimen ditemukan.")
+    df = pd.read_csv(INPUT_CSV, encoding="utf-8-sig")
+    print(f"[📂] Total baris dimuat: {len(df)}")
 
-    path = files[-1]
-    print(f"[📂] Membaca: {path}")
-    df = pd.read_csv(path, encoding="utf-8-sig")
-
-    print("[🔄] Menghitung skor emosi untuk setiap baris...")
-    df = tambah_kolom_emosi(df, kolom_teks="teks_asli")
+    print("\n[🔄] Mendeteksi emosi untuk setiap baris...")
+    df = deteksi_emosi_dataframe(df, kolom_teks="teks_asli")
 
     print("\n[📊] Distribusi emosi dominan:")
-    print(df['emosi_dominan'].value_counts().to_string())
+    print(df["emosi_dominan"].value_counts().to_string())
 
     print("\n[📈] Membuat visualisasi...")
     plot_distribusi_emosi(df)
     plot_wordcloud_emosi(df)
-    plot_emosi_vs_sentimen(df)
+    plot_heatmap_korelasi_emosi(df)
 
-    output_path = os.path.join(OUTPUT_DIR, "mbg_dengan_emosi.csv")
+    output_path = os.path.join(OUTPUT_DIR, "mbg_emosi.csv")
     df.to_csv(output_path, index=False, encoding="utf-8-sig")
-    print(f"\n[💾] Data dengan kolom emosi disimpan: {output_path}")
+    print(f"\n[💾] Data dengan label emosi disimpan: {output_path}")
+
     print("\n[🎉] Deteksi emosi selesai!")
+    print("     Lanjutkan ke 06_modeling_ml.py untuk tahap modeling ML.")
