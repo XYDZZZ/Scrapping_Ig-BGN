@@ -25,6 +25,7 @@ di Instagram terkait program Makan Bergizi Gratis (MBG), dari postingan resmi
 ├── 04_koreksi_sarkasme.py        # Koreksi kesalahan klasifikasi akibat sarkasme
 ├── 05_deteksi_emosi.py           # Deteksi 8 kategori emosi (lexicon-based)
 ├── 06_modeling_ml.py             # Modeling ML (Logistic Regression, Naive Bayes, SVM)
+    07_ringkasan_evaluasi.py      # Ringkasan Evaluasi
 ├── audit_kata_positif.py         # Tool audit kata kunci negatif yang salah label
 ├── requirements.txt              # Daftar dependency Python
 ├── RINGKASAN_HASIL.md            # Ringkasan temuan utama (untuk diskusi kelompok)
@@ -107,6 +108,7 @@ python 03_analisis_sentimen.py
 python 04_koreksi_sarkasme.py
 python 05_deteksi_emosi.py
 python 06_modeling_ml.py
+python 07_ringkasan_evaluasi.py
 ```
 
 Setiap script akan mencetak progress dan ringkasan hasil di terminal, serta
